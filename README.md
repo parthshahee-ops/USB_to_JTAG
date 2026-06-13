@@ -67,7 +67,6 @@ Before compiling, you must convert your compiled logic (FPGA_bitstream_MCU.bin) 
 ```text
 Bash
 python convert.py
-Ensure the generated bitstream.h is located in the same directory as your modified dirtyJtag.c file.
 ```
 
 3. Ensure the generated `bitstream.h` is located in the same directory as your modified `dirtyJtag.c` file.
