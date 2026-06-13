@@ -22,7 +22,7 @@ This custom firmware overrides that safety behavior by:
 │   ├── cmd.c                       # Custom 0xee SPI payload routing logic
 │   ├── dirtyJtagConfig.h           # Remapped power pins (28/29)
 │   └── bitstream.h                 # Embedded target logic array
-├── hardware/                       # Hardware Description Logic
+├── fpga_code/                       # Hardware Description Logic
 │   ├── main.v                      # Verified SPI protocol core
 ├── software/                       # Host-Side Execution
 │   └── flash_fpga.py               # Python payload delivery and SPI diagnostic script
