@@ -1,6 +1,6 @@
 # USB-JTAG 
 
-This repository contains a modified firmware implementation (adapted from DirtyJTAG) tailored for the RP2040, alongside the accompanying hardware description logic and software interface. The system embeds a custom hardware configuration bitstream directly into the C firmware to autonomously configure an attached target device over internal SPI traces, bypassing standard power-sequencing conflicts.
+This repository contains a modified firmware implementation (adapted from DirtyJTAG) tailored for the RP2040, along with the accompanying hardware description language and software interface. The system embeds a custom hardware configuration bitstream directly into the C firmware to configure an attached target device over internal SPI traces autonomously, bypassing standard power-sequencing conflicts.
 
 ## Architecture Overview
 Standard JTAG/SPI bridge implementations often default to pulling power pins LOW upon initialization, which unintentionally wipes the volatile memory of the target hardware during the MCU handoff. 
@@ -72,6 +72,8 @@ Ensure the generated bitstream.h is located in the same directory as your modifi
 
 3. Ensure the generated `bitstream.h` is located in the same directory as your modified `dirtyJtag.c` file.
 
+---
+
 ## Building the Firmware
 Compile the modified firmware using CMake and Ninja from within the pico-dirtyJtag-master directory:
 
@@ -82,6 +84,8 @@ cd build
 cmake -G Ninja ..
 ninja
 ```
+
+---
 
 ## Deployment & Testing
 1. Flash the RP2040
@@ -98,3 +102,5 @@ Once the board is running the custom firmware, use the stripped-down Python diag
 Bash
 python flash_fpga.py
 ```
+
+---
