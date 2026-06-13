@@ -1,66 +1,100 @@
-# USB-to-JTAG Protocol Gateway
+# USB-JTAG 
 
-This repository contains the firmware and hardware description design files for a high-speed, hardware-accelerated protocol conversion gateway. The architecture leverages a Raspberry Pi RP2040 microcontroller and a Renesas ForgeFPGA fabric to bridge an external USB-based master device to a standard IEEE 1149.1 JTAG target scan chain.
+This repository contains a modified firmware implementation (adapted from DirtyJTAG) tailored for the RP2040, alongside the accompanying hardware description logic and software interface. The system embeds a custom hardware configuration bitstream directly into the C firmware to autonomously configure an attached target device over internal SPI traces, bypassing standard power-sequencing conflicts.
 
-## 1. System Architectural Concept
+## Architecture Overview
+Standard JTAG/SPI bridge implementations often default to pulling power pins LOW upon initialization, which unintentionally wipes the volatile memory of the target hardware during the MCU handoff. 
 
-### 1.1 The Step-by-Step Data Journey
-**a. External Host Board**
-It decides what commands to send to the target chip. It writes down these instructions and wraps them in a secure shipping box called a USB Packet to send them down the cable.
+This custom firmware overrides that safety behavior by:
+1. **Locking Power HIGH:** Forcing the voltage regulators (`PIN_PWR` and `PIN_EN`) to stay ON during the boot sequence by mapping the default firmware to dummy pins.
+2. **Autonomous Configuration:** Flashing the target directly using an embedded C-header array (`bitstream.h`).
+3. **Hardware SPI Handoff:** Sending the mandatory wake-up clock pulses and safely releasing the SPI Chip Select (CS) pin from Software I/O mode back to the RP2040's Hardware SPI engine before initiating data routing.
 
-**b. RP2040 Microcontroller**
-It receives the box, slices it open, and throws away the packaging. It extracts the raw message and translates it into a precise, step-by-step blueprint (bit-vectors).
-It sends these blueprints over a fast, 4-lane miniature transit system—the QSPI Bus—straight to the FPGA.
+---
 
-**c. The ForgeFPGA Fabric**
-It reads the blueprints coming off the QSPI bus.
-It uses its lightning-fast digital reflexes to instantly flip physical electrical pins (TCK, TMS, TDI) up and down, turning those blueprints into perfect electrical "Morse code" pulses for the target chip.
+## Repository Structure
 
-### 1.2 Evaluated Host-Side USB Formats (OpenOCD Alternatives)
-Because the exact implementation of the external hardware source can vary, the RP2040 translation layer is being designed to evaluate and potentially support the multiple USB-JTAG driver protocols found in OpenOCD ecosystems:
+```text
+.
+├── firmware/                       # Modified RP2040 C Firmware
+│   ├── CMakeLists.txt              # Build configuration for Pico SDK
+│   ├── dirtyJtag.c                 # Custom boot sequence, power lock, and CS handoff
+│   ├── cmd.c                       # Custom 0xee SPI payload routing logic
+│   ├── dirtyJtagConfig.h           # Remapped power pins (28/29)
+│   └── bitstream.h                 # Embedded target logic array
+├── hardware/                       # Hardware Description Logic
+│   ├── main.v                      # Verified SPI protocol core
+├── software/                       # Host-Side Execution
+│   └── flash_fpga.py               # Python payload delivery and SPI diagnostic script
+└── README.md
+```
 
-* **CMSIS-DAP (ARM Standard):** Utilizes standard USB HID or WinUSB bulk transfer pipes with fixed-size structural sequence packets (e.g., using `DAP_JTAG_Sequence` tokens). Highly portable and natively supported in modern microcontroller development setups.
-* **FT2232 / MPSSE Emulation (FTDI Standard):** Emulates legacy FTDI hardware protocol layers. The RP2040 parses low-level byte streams containing hardware opcodes (such as direction commands and clock edge preferences) accompanied by dedicated length indicators.
-* **ST-LINK (Vendor Proprietary):** Uses encapsulated SCSI mass storage commands over USB bulk endpoints. Highly prevalent on STM32 evaluation targets but carries high software parsing complexity for emulation.
+## Prerequisites
+* **Raspberry Pi Pico SDK** * **CMake** and **Ninja** build tools
+* **Python 3** (with `pyusb` installed for the test script)
 
-## 2. FPGA Internal Processing
+## Setup & Installation
 
-The ForgeFPGA fabric implements three parallel digital logic sub-modules (Stations) running concurrently to handle the incoming QSPI JTAG-data stream:
+### 1. Install the Pico SDK
+Ensure the Raspberry Pi Pico SDK is installed on your system and your `PICO_SDK_PATH` environment variable is correctly configured.
 
-* **QSPI Receiver:** Monitors the QSPI hardware lines. It uses the QSPI Chip Select (`CS`) line transition as a strict framing token to identify packet boundary limits, collecting data bytes on the fly.
-* **Command Parser:** Reads the control tags embedded within our team's custom JTAG format. It splits incoming streams, routing data bits destined for state machine navigation to the `TMS` pipeline and configurations to the `TDI` pipeline.
-* **JTAG Engine:** Ingests the separated streams from the parser and sequences them synchronously into raw electrical transitions across the physical device interface.
+### 2. Download DirtyJTAG
+Clone the original DirtyJTAG repository to your local workspace:
+```bash
+git clone [https://github.com/jeanthom/DirtyJTAG.git](https://github.com/jeanthom/DirtyJTAG.git)
+cd DirtyJTAG
+```
 
-## 3. Project Roadmap & Task Division
+### 3. Replace the Core Source Files
+To enable the custom boot sequence and SPI loopback payload, replace the default DirtyJTAG files with the modified versions provided in this repository:
 
-The development plan is divided into multi-stage engineering, steps allowing for incremental feature verification:
+- `dirtyJtag.c`: Contains the custom hardware boot, power lock, bitstream deployment sequence, and CS pin handover.
 
-### Task 1: OpenOCD Environment Mastery
-* **Objective:** Establish a stable PC-to-MCU software communication loop.
-* **Deliverables:**
-  * Configure OpenOCD environment toolchains and driver scripts.
-  * Compile and deploy a reference JTAG implementation (e.g., CMSIS-DAP) onto the RP2040 target silicon.
-  * Verify that the PC host operating system successfully enumerates the MCU without protocol or interface errors.
+- `cmd.c`: Contains the custom 0xee SPI transfer logic for data routing.
 
-### Task 2: Packet Sniffing & Payload Extraction
-* **Objective:** Reverse-engineer the host-side USB packets to create an unpacking matrix.
-* **Deliverables:**
-  * Capture real-time USB communication transactions using software analyzers (Wireshark + USBPcap).
-  * Map hexadecimal fields down to individual control parameters based on open-source specifications (CMSIS-DAP / FTDI MPSSE).
-  * Implement an initial firmware function on the RP2040 to safely isolate and extract raw data payloads from incoming buffers.
+- `dirtyJtagConfig.h`: Remaps DirtyJTAG's default power control to dummy pins (28/29) to prevent the target from losing power during the handoff.
 
-### Task 3: Translation and QSPI Packaging
-* **Objective:** Map host command packets to internal hardware logic and transmit over the serial bus.
-* **Deliverables:**
-  * Write the translation firmware on the RP2040 to turn extracted USB frames into the team's custom JTAG bit-vector layout.
-  * Implement the hardware-level QSPI Master driver on the RP2040 to push formatted command packets to the FPGA.
-  * Ensure strict timing synchronization between the data stream and the QSPI Chip Select (`CS`) line transitions.
+- `bitstream.h`: The generated C-header file containing the embedded target logic array, allowing the RP2040 to flash the hardware autonomously without external intervention.
 
-### Task 4: Validation, Loopback, and Debugging
-* **Objective:** Perform incremental hardware verification before deploying to a live system.
-* **Deliverables:**
-  * **Phase A:** Inspect output waveforms from the RP2040 pins using a digital logic analyzer to confirm formatting compliance.
-  * **Phase B:** Connect to the ForgeFPGA and implement a temporary internal loopback path (routing output registers straight back to the inbound stream) to verify the data returns to the PC uncorrupted.
-  * **Phase C:** Disconnect loopback frameworks and validate the gateway against a live, physical target chip.
- 
-  ---
+- `CMakeLists.txt`: The modified build configuration file tailored for the Raspberry Pi Pico SDK, ensuring the custom firmware, headers, and specific board definitions are correctly linked during compilation.
+
+### 4. Embed the Target Bitstream
+Before compiling, you must convert your compiled logic (FPGA_bitstream_MCU.bin) into a C header file so the RP2040 can read it natively:
+
+1. Place your compiled .bin file in the same directory as the convert.py script.
+
+2. Run the conversion script:
+```text
+Bash
+python convert.py
+Ensure the generated bitstream.h is located in the same directory as your modified dirtyJtag.c file.
+```
+
+3. Ensure the generated `bitstream.h` is located in the same directory as your modified `dirtyJtag.c` file.
+
+## Building the Firmware
+Compile the modified firmware using CMake and Ninja from within the pico-dirtyJtag-master directory:
+
+```text
+Bash
+mkdir build
+cd build
+cmake -G Ninja ..
+ninja
+```
+
+## Deployment & Testing
+1. Flash the RP2040
+- 1 Hold the BOOTSEL button on your RP2040 board and connect it to your PC via USB (or tap the RESET button while holding BOOTSEL if it is already connected).
+  2 Drag and drop the newly compiled dirtyJtag.uf2 file onto the RPI-RP2 mass storage drive.
+  3 The board will reboot. Watch the onboard LEDs.
+     - Blink Off: Indicates the target is currently being flashed autonomously over the internal SPI traces.
+     - Solid On: Indicates the boot sequence is complete, the voltage regulators are locked open, and the target is ready.
+
+2. Run the Hardware Verification
+Once the board is running the custom firmware, use the stripped-down Python diagnostic script to verify the internal SPI routing:
+
+```text
+Bash
+python flash_fpga.py
+```
