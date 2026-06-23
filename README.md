@@ -3,6 +3,7 @@
 This repository contains a modified firmware implementation (adapted from DirtyJTAG) tailored for the RP2040, along with the accompanying hardware description language and software interface. The system embeds a custom hardware configuration bitstream directly into the C firmware to configure an attached target device over internal SPI traces autonomously, bypassing standard power-sequencing conflicts.
 
 ## Architecture Overview
+
 Standard JTAG/SPI bridge implementations often default to pulling power pins LOW upon initialization, which unintentionally wipes the volatile memory of the target hardware during the MCU handoff. 
 
 This custom firmware overrides that safety behavior by:
@@ -19,16 +20,20 @@ This custom firmware overrides that safety behavior by:
 ├── firmware/                       # Modified RP2040 C Firmware
 │   ├── CMakeLists.txt              # Build configuration for Pico SDK
 │   ├── dirtyJtag.c                 # Custom boot sequence, power lock, and CS handoff
-│   ├── cmd.c                       # Custom 0xee SPI payload routing logic
+│   ├── cmd.c                       # Custom high-speed protocol translation, 32-byte stride alignment, and SPI routing
 │   ├── dirtyJtagConfig.h           # Remapped power pins (28/29)
 │   └── bitstream.h                 # Embedded target logic array
-├── fpga_code/                      # Hardware Description Logic
-│   ├── top.v                       # top module to verify communication
+├── hardware_code/                  # Hardware Description Logic
+│   ├── top.v                       # Top module to verify communication
 │   ├── spi_target.v                # Verified SPI protocol core
 ├── software/                       # Host-Side Execution
-│   └── script_test.py              # Python payload delivery and SPI diagnostic script
+│   ├── script_test.py              # Python payload delivery and SPI diagnostic script
+│   └── dirtyjtag.cfg               # OpenOCD configuration script for JTAG operations
+├── output.txt                      # Sample OpenOCD debug execution log
 └── README.md
 ```
+
+---
 
 ## Prerequisites
 * **Raspberry Pi Pico SDK** * **CMake** and **Ninja** build tools
@@ -87,20 +92,69 @@ ninja
 
 ---
 
+## Interpreting the Output Log (```output.txt```)
+The '''output.txt''' file included in this repository contains a sample execution trace of OpenOCD running with Level 3 Debugging (```-d3```). This log is highly detailed and tracks every bulk USB transfer between the host PC and the RP2040 bridge.
+
+If you are modifying the protocol or troubleshooting a connection, here is how to read and interpret the key sections of the log:
+
+### 1. The Handshake Phase
+Look for lines containing ```dirtyjtag_reset(0,0)``` and ```DR scan interrogation for IDCODE/BYPASS```.
+
+What it means: The host PC successfully found the RP2040 over USB, claimed the interface, and sent the initial ``` CMD_INFO```packets. If the log crashes before this point, your USB passthrough (e.g., ```usbipd```) is likely disconnected.
+
+### 2. The ```syncbb_scan``` Hex Dumps
+When OpenOCD executes a data transfer, you will see a block like this:
+
+```text
+>>> OPENOCD SENDING TO MCU (32 Bytes Flat Payload) >>>
+03 F0 FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF
+```
+- What it means: This shows the exact raw bytes OpenOCD is packaging and sending down the wire.
+  - Byte 03 is the CMD_XFER opcode.
+  - Byte F0 is the requested bit length (240 bits).
+  - The rest is dummy padding.
+
+- How to use it: If the RP2040 parser breaks, count the bytes in this hex dump to ensure your while loop pointer (commands += X) is advancing by the exact same amount.
+
+### 3. The Telemetry Traps
+If there is a desynchronization in the payload stride, the custom telemetry traps will catch it:
+
+```Error: ... --- TELEMETRY TRAP --- Host expected 32 bytes, but actually read: 32 bytes```
+What it means: This confirms the USB pipeline is healthy. OpenOCD demands exactly 32 bytes back for every syncbb_scan payload it sends. If it reads 32, the RP2040 padded the return buffer correctly. If it reads 30 or 0, there is a calculation error in cmd.c causing a buffer underflow.
+
+### 4. End-of-Chain and BYPASS Warnings
+At the end of a loopback or unconfigured hardware test, you might see:
+
+```text
+Warn: Unexpected idcode after end of chain
+Error: IR capture error; saw 0x00, not 0x01
+```
+
+What it means: OpenOCD successfully communicated with the bridge, but the target hardware did not shift out valid JTAG specification bits (like the mandatory 0x01 trailing IR bit). OpenOCD will automatically force the hardware into a 1-bit BYPASS mode for safety, which may cause subsequent deep-register scans to fail. This usually indicates the physical wiring to the target is loose or the target is unpowered.
+
+---
+
 ## Deployment & Testing
-1. Flash the RP2040
+### 1. Flash the RP2040
 - 1 Hold the BOOTSEL button on your RP2040 board and connect it to your PC via USB (or tap the RESET button while holding BOOTSEL if it is already connected).
   2 Drag and drop the newly compiled dirtyJtag.uf2 file onto the RPI-RP2 mass storage drive.
   3 The board will reboot. Watch the onboard LEDs.
      - Blink Off: Indicates the target is currently being flashed autonomously over the internal SPI traces.
      - Solid On: Indicates the boot sequence is complete, the voltage regulators are locked open, and the target is ready.
 
-2. Run the Hardware Verification
+### 2. Run the Hardware Verification
 Once the board is running the custom firmware, use the stripped-down Python diagnostic script to verify the internal SPI routing:
 
+#### Python Diagnostic:
 ```text
 Bash
 python flash_fpga.py
+```
+#### OpenOCD Verification:
+
+```text
+Bash
+sudo openocd -d3 -f software/dirtyjtag.cfg
 ```
 
 ---
