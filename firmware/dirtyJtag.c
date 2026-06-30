@@ -314,7 +314,7 @@ int main(void)
     // =========================================================================
     tusb_init();
     usb_serial_init();
-    djtag_init();
+    //djtag_init();
 
 #if ( CDC_UART_INTF_COUNT > 0 )
     cdc_uart_init(0, PIN_UART0, PIN_UART0_RX, PIN_UART0_TX);
