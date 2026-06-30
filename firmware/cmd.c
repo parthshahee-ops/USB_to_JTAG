@@ -18,6 +18,9 @@
 
 #define SPI_BUF_SIZE 64u
 
+// ---------------------------------------------------------
+// DirtyJTAG Host-Side Identifiers (USB from PC)
+// ---------------------------------------------------------
 enum CommandIdentifier {
   CMD_STOP           = 0x00,
   CMD_INFO           = 0x01,
@@ -43,6 +46,18 @@ enum SignalIdentifier {
   SIG_TMS  = 1 << 4,
   SIG_TRST = 1 << 5,
   SIG_SRST = 1 << 6
+};
+
+// ---------------------------------------------------------
+// Target Hardware Identifiers (SPI to FPGA)
+// ---------------------------------------------------------
+enum TargetSpiCommands {
+  TYPE_TDO_EXIT = 0xEE,
+  TYPE_TDI_EXIT = 0xEF,
+  TYPE_TDI      = 0xF0,
+  TYPE_TDO      = 0xF1,
+  TYPE_TMS      = 0xF2,
+  TYPE_SPEED    = 0xF3
 };
 
 static inline void cs_assert(void)
@@ -89,7 +104,6 @@ void cmd_handle(pio_jtag_inst_t* jtag, uint8_t* rxbuf, uint32_t count, uint8_t* 
   uint8_t spi_tx[SPI_BUF_SIZE];
   uint8_t spi_rx[SPI_BUF_SIZE];
 
-  // March through the batched buffer using the exact stock structural loop
   while ((commands < (rxbuf + count)) && (*commands != CMD_STOP))
   {
     uint8_t current_cmd = *commands;
@@ -105,7 +119,8 @@ void cmd_handle(pio_jtag_inst_t* jtag, uint8_t* rxbuf, uint32_t count, uint8_t* 
     }
     
     case CMD_FREQ:
-      spi_tx[0] = 0xF3;
+      // Translates to: [0xF3] [FREQ_H] [FREQ_L]
+      spi_tx[0] = TYPE_SPEED;
       spi_tx[1] = commands[1];
       spi_tx[2] = commands[2];
 
@@ -113,7 +128,7 @@ void cmd_handle(pio_jtag_inst_t* jtag, uint8_t* rxbuf, uint32_t count, uint8_t* 
       spi_transfer_fifo(spi_tx, NULL, 3);
       cs_deassert();
 
-      commands += 2; // Advance past the 2 argument bytes
+      commands += 2; 
       break;
 
     case CMD_XFER:
@@ -127,26 +142,31 @@ void cmd_handle(pio_jtag_inst_t* jtag, uint8_t* rxbuf, uint32_t count, uint8_t* 
       
       uint16_t byte_len = (transferred_bits + 7) / 8;
 
-      spi_tx[0] = 0xF0;
-      spi_tx[1] = (transferred_bits >> 8) & 0xFF;
-      spi_tx[2] = transferred_bits & 0xFF;
+      // Translate Host CMD_XFER to Target TYPE_TDI (0xF0) or TYPE_TDO (0xF1)
+      spi_tx[0] = no_read ? TYPE_TDI : TYPE_TDO;
+      spi_tx[1] = (transferred_bits >> 8) & 0xFF; // LEN_H
+      spi_tx[2] = transferred_bits & 0xFF;        // LEN_L
+      
       memcpy(&spi_tx[3], commands + 2, byte_len);
 
       cs_assert();
+      // Hardware SPI shift: bits travel to FPGA and return into spi_rx
       spi_transfer_fifo(spi_tx, spi_rx, 3 + byte_len);
       cs_deassert();
 
       if (!no_read) {
+        // HARDWARE REPACKAGING: Route physical bits back to USB with OpenOCD 32-byte padding
         memset(output_buffer, 0, 32);
-        memcpy(output_buffer, &spi_rx[3], byte_len); 
-        output_buffer += 32;                          
+        memcpy(output_buffer, &spi_rx[3], byte_len);
+        output_buffer += 32;
       }
-      commands += 31; 
+
+      commands += 31; // Clear OpenOCD's flat USB chunk
       break;
     }
     
     case CMD_SETSIG:
-      commands += 2; // Advance past the 2 argument bytes
+      commands += 2;
       break;
 
     case CMD_GETSIG:
@@ -163,8 +183,10 @@ void cmd_handle(pio_jtag_inst_t* jtag, uint8_t* rxbuf, uint32_t count, uint8_t* 
       uint8_t byte_len = (clk_pulses + 7) / 8;
       uint8_t tms_fill = (signals & SIG_TMS) ? 0xFF : 0x00;
 
-      spi_tx[0] = 0xF2;
-      spi_tx[1] = clk_pulses;
+      // Translate Host CMD_CLK to Target TYPE_TMS (0xF2)
+      // Format: [0xF2] [LEN_8BIT] [DATA...]
+      spi_tx[0] = TYPE_TMS;
+      spi_tx[1] = clk_pulses; 
       memset(&spi_tx[2], tms_fill, byte_len);
 
       cs_assert();
@@ -176,7 +198,7 @@ void cmd_handle(pio_jtag_inst_t* jtag, uint8_t* rxbuf, uint32_t count, uint8_t* 
         output_buffer += 1;
       }
       
-      commands += 2; // Advance past the 2 argument bytes
+      commands += 2;
       break;
     }
     
@@ -191,10 +213,9 @@ void cmd_handle(pio_jtag_inst_t* jtag, uint8_t* rxbuf, uint32_t count, uint8_t* 
       return; 
     }
 
-    commands++; // Golden loop increment: steps past the opcode byte safely
+    commands++; 
   }
 
-  /* Flush the completed response block back over USB */
   if (tx_buf != output_buffer)
   {
     tud_vendor_write(tx_buf, output_buffer - tx_buf);
