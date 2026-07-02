@@ -14,29 +14,23 @@
 
 #if ( BOARD_TYPE == BOARD_PICO )
 
-// === HARDWARE INTERFACING SPI PINOUT (SHRIKE LITE INTERNAL) ===
+// === HARDWARE INTERFACING SPI PINOUT (SHRIKE INTERNAL) ===
 #define SPI_PORT     spi0
 #define PIN_SPI_MISO 0
 #define PIN_SPI_CS   1
 #define PIN_SPI_SCK  2
 #define PIN_SPI_MOSI 3
 
-// Power, Enable, and Target Reset Signals
-// BUG FIX: PIN_TARGET_RST is now a named macro so it is explicitly managed
-//          at the very start of main() — before power, before SPI — preventing
-//          the reset line from floating during the bitstream deploy phase.
 #define PIN_PWR        12
 #define PIN_EN         13
 #define PIN_TARGET_RST 14  // Active-Low reset for target hardware (asserted LOW first)
 
-// Dummy JTAG pins (keep so the compiler does not throw "undefined" errors;
-// these are wired to unused GPIOs and are never electrically driven)
-#define PIN_TCK  26
-#define PIN_TDI  27
-#define PIN_TMS  28
-#define PIN_TDO  29
-#define PIN_RST  22
-#define PIN_TRST 23
+#define PIN_TCK  24
+#define PIN_TDI  23
+#define PIN_TMS  21
+#define PIN_TDO  22
+#define PIN_RST  25
+#define PIN_TRST 26
 
 // On-Board Status LED (all three roles share one physical LED on the Pico)
 #define LED_INVERTED  0
