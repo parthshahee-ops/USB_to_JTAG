@@ -1,25 +1,23 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
+#include <stdio.h>
 
 #include <pico/stdlib.h>
-#include <hardware/clocks.h>
-#include <hardware/gpio.h>
-#include <hardware/spi.h>
-
-#include "jtag.pio.h"
-#include "tusb.h"
 #include "pio_jtag.h"
+#include "tusb.h"
 #include "cmd.h"
+#include "dirtyJtagConfig.h"
 
-#ifndef SPI_PORT
-#define SPI_PORT spi0
-#endif
-
-#define SPI_BUF_SIZE 64u
+// Set to 1 to trace every command byte over the USB CDC/UART console.
+// Uses printf, which routes to whatever stdio is set up in dirtyJtag.c
+// (usb_serial_init / cdc_uart_init). Disable once done debugging -
+// it will slow things down and can itself desync USB timing.
+#define CMD_TRACE 0
 
 // ---------------------------------------------------------
 // DirtyJTAG Host-Side Identifiers (USB from PC)
+// Verified against phdussud/pico-dirtyJtag upstream cmd.c
 // ---------------------------------------------------------
 enum CommandIdentifier {
   CMD_STOP           = 0x00,
@@ -34,8 +32,10 @@ enum CommandIdentifier {
 };
 
 enum CommandModifier {
+  // CMD_XFER
   NO_READ       = 0x80,
   EXTEND_LENGTH = 0x40,
+  // CMD_CLK
   READOUT       = 0x80
 };
 
@@ -48,174 +48,219 @@ enum SignalIdentifier {
   SIG_SRST = 1 << 6
 };
 
+// Largest bit count CMD_XFER can carry in a single 64-byte USB
+// bulk packet (2 header bytes + 62 payload bytes).
+#define CMD_XFER_MAX_BITS (62 * 8)
+
 // ---------------------------------------------------------
-// Target Hardware Identifiers (SPI to FPGA)
+// CMD_INFO
 // ---------------------------------------------------------
-enum TargetSpiCommands {
-  TYPE_TDO_EXIT = 0xEE,
-  TYPE_TDI_EXIT = 0xEF,
-  TYPE_TDI      = 0xF0,
-  TYPE_TDO      = 0xF1,
-  TYPE_TMS      = 0xF2,
-  TYPE_SPEED    = 0xF3
-};
-
-static inline void cs_assert(void)
+static uint32_t cmd_info(uint8_t *buffer)
 {
-    gpio_put(PIN_SPI_CS, 0);
-    busy_wait_us(1);
+  char info_string[10] = "DJTAG2\n";
+  memcpy(buffer, info_string, 10);
+  return 10;
 }
 
-static inline void cs_deassert(void)
+// ---------------------------------------------------------
+// CMD_FREQ - commands[1..2] = big-endian frequency in kHz
+// ---------------------------------------------------------
+static void cmd_freq(pio_jtag_inst_t* jtag, const uint8_t *commands)
 {
-    busy_wait_us(1);
-    gpio_put(PIN_SPI_CS, 1);
+  jtag_set_clk_freq(jtag, (commands[1] << 8) | commands[2]);
 }
 
-// Custom non-blocking hardware FIFO controller
-static inline void spi_transfer_fifo(const uint8_t *tx_buf, uint8_t *rx_buf, uint32_t len) 
+// ---------------------------------------------------------
+// CMD_XFER - shift transferred_bits of TDI/TDO through the PIO
+// ---------------------------------------------------------
+static uint32_t cmd_xfer(pio_jtag_inst_t* jtag, const uint8_t *commands,
+                          bool extend_length, bool no_read, uint8_t* tx_buf)
 {
-    uint32_t tx_remain = len;
-    uint32_t rx_remain = len;
+  uint16_t transferred_bits = commands[1];
 
-    while (tx_remain > 0 || rx_remain > 0) {
-        while (tx_remain > 0 && spi_is_writable(SPI_PORT)) {
-            spi_get_hw(SPI_PORT)->dr = (uint32_t)*tx_buf++;
-            tx_remain--;
-        }
-        while (rx_remain > 0 && spi_is_readable(SPI_PORT)) {
-            uint8_t rx_byte = (uint8_t)spi_get_hw(SPI_PORT)->dr;
-            if (rx_buf) {
-                *rx_buf++ = rx_byte;
-            }
-            rx_remain--;
-        }
-    }
+  if (extend_length) {
+    transferred_bits += 256;
+  }
+
+  // Prevent overrunning the bounds.
+  if (transferred_bits > CMD_XFER_MAX_BITS) {
+    transferred_bits = CMD_XFER_MAX_BITS;
+  }
+
+  if (!no_read) {
+    // OpenOCD strictly expects a fixed 32-byte block back for XFER reads.
+    memset(tx_buf, 0, 32);
+    
+    // Perform the actual shift. The PIO state machine writes directly into tx_buf.
+    jtag_transfer(jtag, transferred_bits, commands + 2, tx_buf);
+    
+    return 32; // Always return 32 to satisfy OpenOCD's fixed-size read requirement
+  }
+
+  // If no read is requested, just shift the data out.
+  jtag_transfer(jtag, transferred_bits, commands + 2, NULL);
+  return 0;
 }
 
+// ---------------------------------------------------------
+// CMD_SETSIG - direct bit-banged pin control, used by the host
+// to navigate the TAP state machine between CMD_XFER bursts.
+// commands[1] = mask, commands[2] = status
+// ---------------------------------------------------------
+static void cmd_setsig(pio_jtag_inst_t* jtag, const uint8_t *commands)
+{
+  uint8_t signal_mask   = commands[1];
+  uint8_t signal_status = commands[2];
+
+#if CMD_TRACE
+  printf("SETSIG mask=0x%02x status=0x%02x (tms=%d)\n",
+         signal_mask, signal_status, !!(signal_mask & SIG_TMS));
+#endif
+
+  if (signal_mask & SIG_TCK) {
+    jtag_set_clk(jtag, signal_status & SIG_TCK);
+  }
+  if (signal_mask & SIG_TDI) {
+    jtag_set_tdi(jtag, signal_status & SIG_TDI);
+  }
+  if (signal_mask & SIG_TMS) {
+    jtag_set_tms(jtag, signal_status & SIG_TMS);
+  }
+#if !( BOARD_TYPE == BOARD_QMTECH_RP2040_DAUGHTERBOARD )
+  if (signal_mask & SIG_TRST) {
+    jtag_set_trst(jtag, signal_status & SIG_TRST);
+  }
+  if (signal_mask & SIG_SRST) {
+    jtag_set_rst(jtag, signal_status & SIG_SRST);
+  }
+#endif
+}
+
+// ---------------------------------------------------------
+// CMD_GETSIG - report current TDO level
+// ---------------------------------------------------------
+static uint32_t cmd_getsig(pio_jtag_inst_t* jtag, uint8_t *buffer)
+{
+  uint8_t signal_status = 0;
+  if (jtag_get_tdo(jtag)) {
+    signal_status |= SIG_TDO;
+  }
+  buffer[0] = signal_status;
+  return 1;
+}
+
+// ---------------------------------------------------------
+// CMD_CLK - clock clk_pulses cycles with TMS/TDI held at fixed
+// levels. This is the TAP-navigation primitive.
+// commands[1] = signals (SIG_TMS / SIG_TDI bits)
+// commands[2] = clk_pulses
+// ---------------------------------------------------------
+static uint32_t cmd_clk(pio_jtag_inst_t *jtag, const uint8_t *commands,
+                         bool readout, uint8_t *buffer)
+{
+  uint8_t signals    = commands[1];
+  uint8_t clk_pulses = commands[2];
+
+#if CMD_TRACE
+  printf("CLK signals=0x%02x pulses=%d tms=%d tdi=%d readout=%d\n",
+         signals, clk_pulses, !!(signals & SIG_TMS), !!(signals & SIG_TDI), readout);
+#endif
+
+  uint8_t readout_val = jtag_strobe(jtag, clk_pulses,
+                                     signals & SIG_TMS,
+                                     signals & SIG_TDI);
+
+  if (readout) {
+    buffer[0] = readout_val;
+  }
+  return readout ? 1 : 0;
+}
+
+static void cmd_setvoltage(const uint8_t *commands)
+{
+  (void)commands;
+}
+
+static void cmd_gotobootloader(void)
+{
+}
+
+// ---------------------------------------------------------
+// Command Handler for Native PIO JTAG
+// ---------------------------------------------------------
 void cmd_handle(pio_jtag_inst_t* jtag, uint8_t* rxbuf, uint32_t count, uint8_t* tx_buf) {
-  (void)jtag;
-  
   if (count == 0) return;
 
   uint8_t *commands = (uint8_t*)rxbuf;
   uint8_t *output_buffer = tx_buf;
-  
-  uint8_t spi_tx[SPI_BUF_SIZE];
-  uint8_t spi_rx[SPI_BUF_SIZE];
 
   while ((commands < (rxbuf + count)) && (*commands != CMD_STOP))
   {
-    uint8_t current_cmd = *commands;
-    
-    switch (current_cmd & 0x0F) {
-    
+    switch ((*commands) & 0x0F) {
+
     case CMD_INFO:
     {
-      char info_string[10] = "DJTAG2\n";
-      memcpy(output_buffer, info_string, 10);
-      output_buffer += 10;
+      uint32_t trbytes = cmd_info(output_buffer);
+      output_buffer += trbytes;
       break;
     }
-    
+
     case CMD_FREQ:
-      // Translates to: [0xF3] [FREQ_H] [FREQ_L]
-      spi_tx[0] = TYPE_SPEED;
-      spi_tx[1] = commands[1];
-      spi_tx[2] = commands[2];
-
-      cs_assert();
-      spi_transfer_fifo(spi_tx, NULL, 3);
-      cs_deassert();
-
-      commands += 2; 
+      cmd_freq(jtag, commands);
+      commands += 2;
       break;
 
     case CMD_XFER:
     {
-      bool no_read = current_cmd & NO_READ;
-      uint16_t transferred_bits = commands[1];
+      bool no_read = *commands & NO_READ;
+  #if CMD_TRACE
+      printf("XFER bits=%d no_read=%d ext=%d\n", commands[1],
+             no_read, !!(*commands & EXTEND_LENGTH));
+  #endif
+      uint32_t trbytes = cmd_xfer(jtag, commands, *commands & EXTEND_LENGTH, no_read, output_buffer);
       
-      if (current_cmd & EXTEND_LENGTH) {
-        transferred_bits += 256;
-      }
-      
-      uint16_t byte_len = (transferred_bits + 7) / 8;
-
-      // Translate Host CMD_XFER to Target TYPE_TDI (0xF0) or TYPE_TDO (0xF1)
-      spi_tx[0] = no_read ? TYPE_TDI : TYPE_TDO;
-      spi_tx[1] = (transferred_bits >> 8) & 0xFF; // LEN_H
-      spi_tx[2] = transferred_bits & 0xFF;        // LEN_L
-      
-      memcpy(&spi_tx[3], commands + 2, byte_len);
-
-      cs_assert();
-      // Hardware SPI shift: bits travel to FPGA and return into spi_rx
-      spi_transfer_fifo(spi_tx, spi_rx, 3 + byte_len);
-      cs_deassert();
-
-      if (!no_read) {
-        // HARDWARE REPACKAGING: Route physical bits back to USB with OpenOCD 32-byte padding
-        memset(output_buffer, 0, 32);
-        memcpy(output_buffer, &spi_rx[3], byte_len);
-        output_buffer += 32;
-      }
-
-      commands += 31; // Clear OpenOCD's flat USB chunk
+      output_buffer += trbytes; 
+      commands += 31; // OpenOCD XFER commands are always 32 bytes total (1 cmd + 31 payload)
       break;
     }
-    
+
     case CMD_SETSIG:
+      cmd_setsig(jtag, commands);
       commands += 2;
       break;
 
     case CMD_GETSIG:
-      output_buffer[0] = 0x00;
-      output_buffer += 1;
+    {
+      uint32_t trbytes = cmd_getsig(jtag, output_buffer);
+      output_buffer += trbytes;
       break;
-      
+    }
+
     case CMD_CLK:
     {
-      bool readout = current_cmd & READOUT;
-      uint8_t signals = commands[1];
-      uint8_t clk_pulses = commands[2];
-      
-      uint8_t byte_len = (clk_pulses + 7) / 8;
-      uint8_t tms_fill = (signals & SIG_TMS) ? 0xFF : 0x00;
-
-      // Translate Host CMD_CLK to Target TYPE_TMS (0xF2)
-      // Format: [0xF2] [LEN_8BIT] [DATA...]
-      spi_tx[0] = TYPE_TMS;
-      spi_tx[1] = clk_pulses; 
-      memset(&spi_tx[2], tms_fill, byte_len);
-
-      cs_assert();
-      spi_transfer_fifo(spi_tx, spi_rx, 2 + byte_len);
-      cs_deassert();
-
-      if (readout) {
-        output_buffer[0] = spi_rx[2];
-        output_buffer += 1;
-      }
-      
+      uint32_t trbytes = cmd_clk(jtag, commands, !!(*commands & READOUT), output_buffer);
+      output_buffer += trbytes;
       commands += 2;
       break;
     }
-    
+
     case CMD_SETVOLTAGE:
+      cmd_setvoltage(commands);
       commands += 1;
       break;
 
     case CMD_GOTOBOOTLOADER:
+      cmd_gotobootloader();
       break;
-      
+
     default:
-      return; 
+      return; /* Unsupported command, halt */
     }
 
-    commands++; 
+    commands++;
   }
 
+  /* Send the transfer response back to host */
   if (tx_buf != output_buffer)
   {
     tud_vendor_write(tx_buf, output_buffer - tx_buf);
