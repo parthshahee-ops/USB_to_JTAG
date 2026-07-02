@@ -1,160 +1,252 @@
-# USB-JTAG 
+# USB-JTAG using RP2040
 
-This repository contains a modified firmware implementation (adapted from DirtyJTAG) tailored for the RP2040, along with the accompanying hardware description language and software interface. The system embeds a custom hardware configuration bitstream directly into the C firmware to configure an attached target device over internal SPI traces autonomously, bypassing standard power-sequencing conflicts.
+A modified **DirtyJTAG** firmware for the **RP2040**, designed to provide a reliable, high-speed USB-to-JTAG bridge for debugging and programming ARM-based microcontrollers (such as STM32 devices) using **OpenOCD**.
 
-## Architecture Overview
-
-Standard JTAG/SPI bridge implementations often default to pulling power pins LOW upon initialization, which unintentionally wipes the volatile memory of the target hardware during the MCU handoff. 
-
-This custom firmware overrides that safety behavior by:
-1. **Locking Power HIGH:** Forcing the voltage regulators (`PIN_PWR` and `PIN_EN`) to stay ON during the boot sequence by mapping the default firmware to dummy pins.
-2. **Autonomous Configuration:** Flashing the target directly using an embedded C-header array (`bitstream.h`).
-3. **Hardware SPI Handoff:** Sending the mandatory wake-up clock pulses and safely releasing the SPI Chip Select (CS) pin from Software I/O mode back to the RP2040's Hardware SPI engine before initiating data routing.
+Unlike the original DirtyJTAG implementation, this firmware focuses on improving JTAG communication stability by correcting packet formatting, TAP state transitions, and USB transfer handling while leveraging the RP2040's **PIO** and **DMA** hardware for efficient JTAG operations.
 
 ---
 
-## Repository Structure
+# Features
+
+* Native **USB-to-JTAG** bridge running entirely on the RP2040
+* Direct PIO-driven JTAG communication (no external translation hardware)
+* High-speed JTAG shifting using RP2040 PIO + DMA
+* Compatible with OpenOCD DirtyJTAG driver
+* Supports programming and debugging ARM Cortex-M targets
+
+---
+
+# Architecture
+
+```
+                 USB
+                  │
+                  ▼
+          ┌─────────────────┐
+          │      Host PC    │
+          │     OpenOCD     │
+          └─────────────────┘
+                  │
+          DirtyJTAG Protocol
+                  │
+                  ▼
+      ┌─────────────────────────┐
+      │        RP2040           │
+      │  Modified DirtyJTAG FW  │
+      └─────────────────────────┘
+                  │
+           TCK TMS TDI TDO
+                  │
+                  ▼
+       ┌─────────────────────┐
+       │ Target MCU (STM32)  │
+       └─────────────────────┘
+```
+
+---
+
+# Why This Firmware?
+
+Traditional DirtyJTAG implementations occasionally experience issues such as:
+
+* Improper TAP state transitions
+* Variable-length USB packet responses
+* OpenOCD assertion failures
+* Communication stalls during large JTAG transfers
+
+# Repository Structure
 
 ```text
 .
-├── firmware/                       # Modified RP2040 C Firmware
-│   ├── CMakeLists.txt              # Build configuration for Pico SDK
-│   ├── dirtyJtag.c                 # Custom boot sequence, power lock, and CS handoff
-│   ├── cmd.c                       # Custom high-speed protocol translation, 32-byte stride alignment, and SPI routing
-│   ├── dirtyJtagConfig.h           # Remapped power pins (28/29)
-│   └── bitstream.h                 # Embedded target logic array
-├── hardware_code/                  # Hardware Description Logic
-│   ├── top.v                       # Top module to verify communication
-│   ├── spi_target.v                # Verified SPI protocol core
-├── software/                       # Host-Side Execution
-│   ├── script_test.py              # Python payload delivery and SPI diagnostic script
-│   └── dirtyjtag.cfg               # OpenOCD configuration script for JTAG operations
-├── output.txt                      # Sample OpenOCD debug execution log
+├── firmware/
+│   ├── CMakeLists.txt
+│   ├── dirtyJtag.c
+│   ├── cmd.c
+│   └── dirtyJtagConfig.h
+│   └── flash_4_blink.bin
+│
+├── software/
+│   └── dirtyjtag.cfg
+│
 └── README.md
 ```
 
+## Directory Overview
+
+### `firmware/`
+
+Modified RP2040 firmware.
+
+| File                | Description                                                                           |
+| ------------------- | ------------------------------------------------------------------------------------- |
+| `dirtyJtag.c`       | Main firmware entry point and PIO scheduler                                           |
+| `cmd.c`             | USB command parser, protocol handler, TAP navigation, and fixed packet implementation |
+| `dirtyJtagConfig.h` | Board-specific pin mappings and configuration                                         |
+| `CMakeLists.txt`    | Build configuration                                                                   |
+| `flash_4_blink.bin` | OpenOCD interface configuration for the modified firmware                             |
+
+### `software/`
+
+Host-side OpenOCD configuration.
+
+| File            | Description                                               |
+| --------------- | --------------------------------------------------------- |
+| `dirtyjtag.cfg` | OpenOCD interface configuration for the modified firmware |
+
 ---
 
-## Prerequisites
-* **Raspberry Pi Pico SDK** * **CMake** and **Ninja** build tools
-* **Python 3** (with `pyusb` installed for the test script)
+# Prerequisites
 
-## Setup & Installation
+Install the following tools before building:
 
-### 1. Install the Pico SDK
-Ensure the Raspberry Pi Pico SDK is installed on your system and your `PICO_SDK_PATH` environment variable is correctly configured.
+* Raspberry Pi Pico SDK
+* CMake (3.13 or newer)
+* Ninja
+* ARM GCC Toolchain
+* OpenOCD (compiled with DirtyJTAG support)
 
-### 2. Download DirtyJTAG
-Clone the original DirtyJTAG repository to your local workspace:
+---
+
+# Installation
+
+## 1. Install the Pico SDK
+
+Install the Pico SDK and configure the environment variable:
+
 ```bash
-git clone [https://github.com/jeanthom/DirtyJTAG.git](https://github.com/jeanthom/DirtyJTAG.git)
+export PICO_SDK_PATH=/path/to/pico-sdk
+```
+
+---
+
+## 2. Clone DirtyJTAG
+
+Clone the original DirtyJTAG repository:
+
+```bash
+git clone https://github.com/jeanthom/DirtyJTAG.git
 cd DirtyJTAG
 ```
 
-### 3. Replace the Core Source Files
-To enable the custom boot sequence and SPI loopback payload, replace the default DirtyJTAG files with the modified versions provided in this repository:
-
-- `dirtyJtag.c`: Contains the custom hardware boot, power lock, bitstream deployment sequence, and CS pin handover.
-
-- `cmd.c`: Contains the custom 0xee SPI transfer logic for data routing.
-
-- `dirtyJtagConfig.h`: Remaps DirtyJTAG's default power control to dummy pins (28/29) to prevent the target from losing power during the handoff.
-
-- `bitstream.h`: The generated C-header file containing the embedded target logic array, allowing the RP2040 to flash the hardware autonomously without external intervention.
-
-- `CMakeLists.txt`: The modified build configuration file tailored for the Raspberry Pi Pico SDK, ensuring the custom firmware, headers, and specific board definitions are correctly linked during compilation.
-
-### 4. Embed the Target Bitstream
-Before compiling, you must convert your compiled logic (FPGA_bitstream_MCU.bin) into a C header file so the RP2040 can read it natively:
-
-1. Place your compiled .bin file in the same directory as the convert.py script.
-
-2. Run the conversion script:
-```text
-Bash
-python convert.py
-```
-
-3. Ensure the generated `bitstream.h` is located in the same directory as your modified `dirtyJtag.c` file.
-
 ---
 
-## Building the Firmware
-Compile the modified firmware using CMake and Ninja from within the pico-dirtyJtag-master directory:
+## 3. Replace the Source Files
 
-```text
-Bash
+Replace the following files with the versions from this repository:
+
+```
+cmd.c
+dirtyJtag.c
+dirtyJtagConfig.h
+```
+---
+
+# Building
+
+Create a build directory and compile the firmware:
+
+```bash
 mkdir build
 cd build
-cmake -G Ninja ..
-ninja
+
+cmake -G "Ninja" -DPICO_SDK_PATH="C:\Program Files\Raspberry Pi\Pico SDK v1.5.1\pico-sdk" ..
+"C:\Program Files\Raspberry Pi\Pico SDK v1.5.1\ninja\ninja.exe"
+```
+
+After a successful build, the generated UF2 image will be located in the build directory.
+
+---
+
+# Flashing the RP2040
+
+1. Hold the **BOOTSEL** button.
+2. Connect the RP2040 to your PC.
+3. Release the button once the **RPI-RP2** storage device appears.
+4. Copy the generated UF2 file onto the drive.
+
+The board will automatically reboot and enumerate as a USB DirtyJTAG device.
+
+---
+
+# Wiring
+
+Connect the RP2040 JTAG pins to the target MCU.
+
+| RP2040            | Target |
+| ----------------- | ------ |
+| TCK               | TCK    |
+| TMS               | TMS    |
+| TDI               | TDI    |
+| TDO               | TDO    |
+| GND               | GND    |
+
+> Ensure both boards share a common ground.
+
+---
+
+# Programming a Target Device
+
+Use the supplied OpenOCD configuration:
+
+```bash
+sudo openocd \
+    -f software/dirtyjtag.cfg \
+    -c "program flash_4_blink.bin 0x08000000 verify reset exit"
 ```
 
 ---
 
-## Interpreting the Output Log (```output.txt```)
-The '''output.txt''' file included in this repository contains a sample execution trace of OpenOCD running with Level 3 Debugging (```-d3```). This log is highly detailed and tracks every bulk USB transfer between the host PC and the RP2040 bridge.
+# Expected Output
 
-If you are modifying the protocol or troubleshooting a connection, here is how to read and interpret the key sections of the log:
+A successful programming session should:
 
-### 1. The Handshake Phase
-Look for lines containing ```dirtyjtag_reset(0,0)``` and ```DR scan interrogation for IDCODE/BYPASS```.
-
-What it means: The host PC successfully found the RP2040 over USB, claimed the interface, and sent the initial ``` CMD_INFO```packets. If the log crashes before this point, your USB passthrough (e.g., ```usbipd```) is likely disconnected.
-
-### 2. The ```syncbb_scan``` Hex Dumps
-When OpenOCD executes a data transfer, you will see a block like this:
-
-```text
->>> OPENOCD SENDING TO MCU (32 Bytes Flat Payload) >>>
-03 F0 FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF FF
-```
-- What it means: This shows the exact raw bytes OpenOCD is packaging and sending down the wire.
-  - Byte 03 is the CMD_XFER opcode.
-  - Byte F0 is the requested bit length (240 bits).
-  - The rest is dummy padding.
-
-- How to use it: If the RP2040 parser breaks, count the bytes in this hex dump to ensure your while loop pointer (commands += X) is advancing by the exact same amount.
-
-### 3. The Telemetry Traps
-If there is a desynchronization in the payload stride, the custom telemetry traps will catch it:
-
-```Error: ... --- TELEMETRY TRAP --- Host expected 32 bytes, but actually read: 32 bytes```
-What it means: This confirms the USB pipeline is healthy. OpenOCD demands exactly 32 bytes back for every syncbb_scan payload it sends. If it reads 32, the RP2040 padded the return buffer correctly. If it reads 30 or 0, there is a calculation error in cmd.c causing a buffer underflow.
-
-### 4. End-of-Chain and BYPASS Warnings
-At the end of a loopback or unconfigured hardware test, you might see:
-
-```text
-Warn: Unexpected idcode after end of chain
-Error: IR capture error; saw 0x00, not 0x01
-```
-
-What it means: OpenOCD successfully communicated with the bridge, but the target hardware did not shift out valid JTAG specification bits (like the mandatory 0x01 trailing IR bit). OpenOCD will automatically force the hardware into a 1-bit BYPASS mode for safety, which may cause subsequent deep-register scans to fail. This usually indicates the physical wiring to the target is loose or the target is unpowered.
+* Detect the DirtyJTAG interface
+* Select JTAG transport
+* Configure a 2000 kHz JTAG clock
+* Discover the target TAP(s)
+* Detect the Cortex-M core
+* Halt the processor
+* Erase flash
+* Program the firmware
+* Verify flash contents
+* Reset the target
+* Exit without errors
 
 ---
 
-## Deployment & Testing
-### 1. Flash the RP2040
-- 1 Hold the BOOTSEL button on your RP2040 board and connect it to your PC via USB (or tap the RESET button while holding BOOTSEL if it is already connected).
-  2 Drag and drop the newly compiled dirtyJtag.uf2 file onto the RPI-RP2 mass storage drive.
-  3 The board will reboot. Watch the onboard LEDs.
-     - Blink Off: Indicates the target is currently being flashed autonomously over the internal SPI traces.
-     - Solid On: Indicates the boot sequence is complete, the voltage regulators are locked open, and the target is ready.
+# Troubleshooting
 
-### 2. Run the Hardware Verification
-Once the board is running the custom firmware, use the stripped-down Python diagnostic script to verify the internal SPI routing:
+### OpenOCD cannot detect the target
 
-#### Python Diagnostic:
-```text
-Bash
-python flash_fpga.py
-```
-#### OpenOCD Verification:
-
-```text
-Bash
-sudo openocd -d3 -f software/dirtyjtag.cfg
-```
+* Verify JTAG wiring.
+* Check power to the target board.
+* Confirm TCK, TMS, TDI, and TDO connections.
+* Ensure a common ground between boards.
 
 ---
+
+### USB device not detected
+
+* Reflash the RP2040 firmware.
+* Check USB cable quality.
+* Verify the firmware built successfully.
+
+---
+
+# Credits
+
+This project is based on the **DirtyJTAG** project and extends it with:
+
+* RP2040-specific support
+* Improved OpenOCD compatibility
+* Reliable TAP state management
+* Fixed USB packet handling
+* Stable high-speed JTAG communication
+
+Special thanks to the original DirtyJTAG developers [https://github.com/phdussud/pico-dirtyJtag/tree/master] for providing the foundation for this work.
+
+---
+
+# License
+
+This project inherits the licensing terms of the original DirtyJTAG project unless otherwise specified.
