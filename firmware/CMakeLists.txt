@@ -89,7 +89,7 @@ target_link_libraries(dirtyJtag PRIVATE pico_stdlib)
 # Add any user requested libraries
 target_link_libraries(dirtyJtag PRIVATE
     hardware_pio
-    hardware_spi   # <--- SPI LIBRARY ADDED HERE
+    hardware_spi   
 	hardware_dma
 	pico_unique_id
 	tinyusb_device
