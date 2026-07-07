@@ -29,6 +29,15 @@
 
 /*
  * RP2040 DirtyJTAG Firmware - Standard PIO JTAG Mode (STM32 Target)
+ *
+ * Phase-2 / Option-2 pivot: single-channel FT232H emulation. All
+ * Channel B / UART-passthrough logic has been removed. There is now
+ * exactly one vendor interface (index 0), so tud_vendor_available()/
+ * tud_vendor_read()/tud_vendor_write() (non-indexed) are used directly --
+ * no more risk of an index mismatch between the availability check and
+ * the read call, which was the actual cause of the mpsse_flush() hang
+ * (the old code checked tud_vendor_n_available(1) but read from
+ * tud_vendor_n_read(0, ...), so Channel A data was never picked up.)
  */
 
 #include <stdio.h>
@@ -37,7 +46,6 @@
 #include "hardware/pio.h"
 #include "pico/multicore.h"
 #include "pio_jtag.h"
-#include "cdc_uart.h"
 #include "led.h"
 #include "bsp/board.h"
 #include "tusb.h"
@@ -109,6 +117,9 @@ void jtag_main_task(void)
     if (!buffer_infos[wr_buffer_number].busy) {
         tud_task();
 
+        // Single vendor interface now (CFG_TUD_VENDOR=1): JTAG/MPSSE
+        // traffic -> cmd_handle() pipeline. Non-indexed tud_vendor_*
+        // calls are unambiguous again since there's only one interface.
         if (tud_vendor_available()) {
             led_rx(1);
             uint bnum  = wr_buffer_number;
@@ -122,10 +133,6 @@ void jtag_main_task(void)
 #endif
             }
             led_rx(0);
-        } else {
-#if ( CDC_UART_INTF_COUNT > 0 )
-            cdc_uart_task();
-#endif
         }
     }
 }
@@ -165,12 +172,70 @@ void fetch_command(void)
 #endif
 }
 
+// ---------------------------------------------------------------------------
+// FTDI SIO control requests (EP0). libftdi/pyftdi/OpenOCD send these during
+// device open (SIO_RESET) and periodically (SIO_SET_BITMODE when entering
+// MPSSE mode, SIO_SET_LATENCY_TIMER, etc). Previously this callback
+// unconditionally STALLed every vendor control request, which broke
+// mpsse_open() before any bulk data could ever flow (LIBUSB_ERROR_PIPE).
+//
+// Minimum viable behavior: ACK (return true) all known FTDI SIO bRequest
+// values so host-side opens succeed. Most are no-ops functionally right now;
+// SIO_SET_BITMODE is the one that matters going forward (that's the request
+// that tells the device "enter MPSSE mode" - currently accepted but ignored
+// since the single interface only ever speaks MPSSE in this build).
+// ---------------------------------------------------------------------------
+#define FTDI_SIO_RESET              0x00
+#define FTDI_SIO_SET_MODEM_CTRL     0x01
+#define FTDI_SIO_SET_FLOW_CTRL      0x02
+#define FTDI_SIO_SET_BAUD_RATE      0x03
+#define FTDI_SIO_SET_DATA           0x04
+#define FTDI_SIO_SET_LATENCY_TIMER  0x09
+#define FTDI_SIO_GET_LATENCY_TIMER  0x0A
+#define FTDI_SIO_SET_BITMODE        0x0B
+#define FTDI_SIO_READ_EEPROM        0x90
+
 bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage,
                                  tusb_control_request_t const *request)
 {
-    (void)rhport; (void)request;
+    (void)rhport;
+
     if (stage != CONTROL_STAGE_SETUP) return true;
-    return false;
+
+    switch (request->bRequest) {
+        case FTDI_SIO_RESET:
+        case FTDI_SIO_SET_MODEM_CTRL:
+        case FTDI_SIO_SET_FLOW_CTRL:
+        case FTDI_SIO_SET_BAUD_RATE:
+        case FTDI_SIO_SET_DATA:
+        case FTDI_SIO_SET_LATENCY_TIMER:
+        case FTDI_SIO_SET_BITMODE:
+            // No hardware action needed for most of these yet; ACK so the
+            // host's open/init sequence doesn't stall. Revisit
+            // SET_BITMODE if runtime MPSSE mode switching is ever needed.
+            return tud_control_status(rhport, request);
+
+        case FTDI_SIO_GET_LATENCY_TIMER:
+        {
+            // Host expects 1 byte back: current latency timer value (ms).
+            // Report a fixed placeholder value; not yet tracked per-device.
+            uint8_t latency = 16;
+            return tud_control_xfer(rhport, request, &latency, 1);
+        }
+
+        case FTDI_SIO_READ_EEPROM:
+            // No emulated EEPROM contents; ACK with zeroed data so chip-type
+            // probing doesn't hang, rather than STALLing and failing open.
+        {
+            uint8_t eeprom_stub[2] = {0x00, 0x00};
+            return tud_control_xfer(rhport, request, eeprom_stub, sizeof(eeprom_stub));
+        }
+
+        default:
+            // Unknown vendor request: STALL as before, don't silently
+            // pretend to support requests we haven't reasoned about.
+            return false;
+    }
 }
 
 // ===========================================================================
@@ -179,6 +244,10 @@ bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage,
 int main(void)
 {
     board_init();
+    // --- ADD THESE THREE LINES TO INITIALIZE THE LED ---
+    gpio_init(PICO_DEFAULT_LED_PIN);
+    gpio_set_dir(PICO_DEFAULT_LED_PIN, GPIO_OUT);
+    gpio_put(PICO_DEFAULT_LED_PIN, 0); // Start with it turned off
     led_init(LED_INVERTED, PIN_LED_TX, PIN_LED_RX, PIN_LED_ERROR);
 
     // =========================================================================
@@ -187,17 +256,15 @@ int main(void)
     // =========================================================================
     tusb_init();
     usb_serial_init();
-    
+
     // CRITICAL FIX: We restore djtag_init() to map the physical pins
     // back to the RP2040's native PIO JTAG state machine.
     djtag_init();
 
-#if ( CDC_UART_INTF_COUNT > 0 )
-    cdc_uart_init(0, PIN_UART0, PIN_UART0_RX, PIN_UART0_TX);
-#endif
-#if ( CDC_UART_INTF_COUNT > 1 )
-    cdc_uart_init(1, PIN_UART1, PIN_UART1_RX, PIN_UART1_TX);
-#endif
+    // UART passthrough (old Channel B) has been removed as part of the
+    // single-channel FT232H pivot. If UART bring-up is needed again later,
+    // it will need its own dedicated interface/endpoint plan rather than
+    // being multiplexed onto this vendor interface.
 
 #ifdef MULTICORE
     multicore_launch_core1(core1_entry);

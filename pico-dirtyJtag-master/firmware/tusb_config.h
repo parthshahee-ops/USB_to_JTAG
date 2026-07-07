@@ -67,6 +67,7 @@
 //------------- CLASS -------------//
 #define CFG_TUD_HID             0
 
+<<<<<<< HEAD
 #define CFG_TUD_CDC CDC_UART_INTF_COUNT
 #define CFG_TUD_MSC             0
 #define CFG_TUD_MIDI            0
@@ -77,6 +78,22 @@
 #define CFG_TUD_CDC_TX_BUFSIZE    256
 #endif
 
+=======
+// CDC removed for Phase-2 FT232H bring-up: this is a single vendor-class
+// bulk interface speaking MPSSE, not CDC-ACM -- real FT232H does not
+// expose CDC at the USB level.
+#define CFG_TUD_CDC              0
+#define CFG_TUD_MSC             0
+#define CFG_TUD_MIDI            0
+
+// Single vendor interface (FT232H, single channel). The earlier
+// FT2232H/dual-channel design (Channel A JTAG + Channel B UART) has been
+// dropped in favor of this simpler single-interface pivot.
+#define CFG_TUD_VENDOR          1
+
+// 128/64 is a reasonable starting point; revisit once JTAG/MPSSE scan
+// batching is in place -- larger RX/TX may help throughput.
+>>>>>>> cc7aee7 (Update firmware with single-channel FT@#@H MPSSE)
 #define CFG_TUD_VENDOR_RX_BUFSIZE 128
 #define CFG_TUD_VENDOR_TX_BUFSIZE 64
 
@@ -84,4 +101,8 @@
  }
 #endif
 
+<<<<<<< HEAD
 #endif /* _TUSB_CONFIG_H_ */
+=======
+#endif /* _TUSB_CONFIG_H_ */
+>>>>>>> cc7aee7 (Update firmware with single-channel FT@#@H MPSSE)
