@@ -1,8 +1,8 @@
-# Shrike Lite — RP2040 MPSSE Emulation Bridge
+# Shrike Lite - RP2040 MPSSE Emulation Bridge
 
-Hardware interfacing bridge that turns an RP2040-based **Shrike Lite** board into a single-channel, high-speed FTDI FT232H-compatible USB device, speaking the native FTDI MPSSE (Multi-Protocol Synchronous Serial Engine) protocol directly over USB. This lets standard host tooling — OpenOCD's mainline `ftdi` adapter driver, `libftdi`, `pyftdi` — talk to Shrike Lite as if it were genuine FTDI hardware, with no custom host-side driver required.
+Hardware interfacing bridge that turns an RP2040-based **Shrike Lite** board into a single-channel, high-speed FTDI FT232H-compatible USB device, speaking the native FTDI MPSSE (Multi-Protocol Synchronous Serial Engine) protocol directly over USB. This lets standard host tooling - OpenOCD's mainline `ftdi` adapter driver, `libftdi`, `pyftdi` - talk to Shrike Lite as if it were genuine FTDI hardware, with no custom host-side driver required.
 
-> **Status: Phase-2 bring-up in progress.** USB enumeration, descriptor-level FTDI identity, and EP0 control-transfer handling are confirmed working. **Bulk data transfer is not yet reliable** — see [issue](https://github.com/ORG/REPO/issues/ISSUE_NUMBER).
+> **Status: Phase-2 bring-up in progress.** USB enumeration, descriptor-level FTDI identity, and EP0 control-transfer handling are confirmed working. **Bulk data transfer is not yet reliable** - see [issue](https://github.com/ORG/REPO/issues/ISSUE_NUMBER).
 
 ---
 
@@ -10,7 +10,7 @@ Hardware interfacing bridge that turns an RP2040-based **Shrike Lite** board int
 
 Shrike Lite's RP2040 firmware is a derivative of [phdussud/pico-dirtyJtag](https://github.com/phdussud/pico-dirtyJtag), originally built around DirtyJTAG's own native USB command protocol. Phase-2 replaces that native protocol with an MPSSE opcode interpreter, so the board enumerates and behaves as an FTDI FT232H (VID `0x0403`, PID `0x6014`) instead of a custom vendor device.
 
-**Goal:** a driverless OpenOCD hardware debugging interface — plug in Shrike Lite, point OpenOCD's stock `ftdi` driver at it, and get a working JTAG connection to a target (currently validated against an STM32F4 target board) with no custom OpenOCD build and no custom host driver.
+**Goal:** a driverless OpenOCD hardware debugging interface - plug in Shrike Lite, point OpenOCD's stock `ftdi` driver at it, and get a working JTAG connection to a target (currently validated against an STM32F4 target board) with no custom OpenOCD build and no custom host driver.
 
 ## How It Works
 
@@ -21,23 +21,23 @@ Host PC (OpenOCD / pyftdi / libftdi)
 TinyUSB device stack (single vendor-class interface, EP0 control handling)
         │
         ▼
-MPSSE opcode parser (cmd.c) — stateful across USB packets
+MPSSE opcode parser (cmd.c) - stateful across USB packets
         │
         ▼
-RP2040 PIO state machine (pio_jtag.c) — TCK/TDI/TDO/TMS bit-shifting
+RP2040 PIO state machine (pio_jtag.c) - TCK/TDI/TDO/TMS bit-shifting
         │
         ▼
 Physical JTAG pins → target device
 ```
 
-The device broadcasts the standard FTDI VID/PID pair `0403:6014` (FT232H, single channel). No FPGA involved — this is a pure RP2040 PIO + TinyUSB implementation.
+The device broadcasts the standard FTDI VID/PID pair `0403:6014` (FT232H, single channel). No FPGA involved - this is a pure RP2040 PIO + TinyUSB implementation.
 
 ## Repository Structure
 
 ```
 .
 ├── pico-dirtyJtag-master/    # Firmware source (CMake project, TinyUSB + PIO)
-├── dirtyJtag.uf2             # Pre-compiled binary — flash this directly, no build required
+├── dirtyJtag.uf2             # Pre-compiled binary - flash this directly, no build required
 ├── README.md
 └── .gitignore
 ```
@@ -48,9 +48,9 @@ If you want to modify firmware, build from `pico-dirtyJtag-master/` with the Pic
 
 - **Target hardware:** Shrike Lite (RP2040-based board), an STM32F4 target board for JTAG testing
 - **Host environment:** Windows with WSL (Windows Subsystem for Linux)
-- **[usbipd-win](https://github.com/dorssel/usbipd-win/releases)** — tested against `5.3.0`, for USB device passthrough into WSL
-- **OpenOCD** — see [Known Issues](#known-issues) for which build to use
-- Python 3 + `pyftdi` (`pip3 install pyftdi --break-system-packages`) — used for isolated smoke-testing independent of OpenOCD
+- **[usbipd-win](https://github.com/dorssel/usbipd-win/releases)** - tested against `5.3.0`, for USB device passthrough into WSL
+- **OpenOCD** - see [Known Issues](#known-issues) for which build to use
+- Python 3 + `pyftdi` (`pip3 install pyftdi --break-system-packages`) - used for isolated smoke-testing independent of OpenOCD
 
 ## Step-by-Step Implementation Guide
 
@@ -95,7 +95,7 @@ Unplug/replug (or re-run `usbipd attach`) after adding the rule for it to take e
 
 ### Step D: Installing OpenOCD
 
-**Try this first — mainline OpenOCD, no fork needed:**
+**Try this first - mainline OpenOCD, no fork needed:**
 ```bash
 sudo apt update && sudo apt install openocd
 ```
@@ -110,12 +110,12 @@ sudo openocd -c "adapter driver ftdi" -c "ftdi_vid_pid 0x0403 0x6014" -c "ftdi_c
 
 **If this connects and completes target detection: great, we're done - that's the primary supported path.**
 
-**If OpenOCD hangs at `mpsse_flush()`** — this is a known, tracked problem; see [issue](https://github.com/ORG/REPO/issues/ISSUE_NUMBER). While it's open, you have two options:
+**If OpenOCD hangs at `mpsse_flush()`** - this is a known, tracked problem; see [issue](https://github.com/ORG/REPO/issues/ISSUE_NUMBER). While it's open, you have two options:
 Wait for a firmware fix and re-flash an updated `dirtyJtag.uf2`, or
 
 ## Acknowledgements
 
-- [phdussud/pico-dirtyJtag](https://github.com/phdussud/pico-dirtyJtag) — this firmware is a direct derivative of this project
-- [jeanthom/openocd-dirtyjtag](https://github.com/jeanthom/openocd-dirtyjtag) — OpenOCD driver for DirtyJTAG's native protocol, used as a fallback path
-- [pyftdi](https://github.com/eblot/pyftdi) — used for isolated MPSSE smoke-testing independent of OpenOCD
-- [TinyUSB](https://github.com/hathach/tinyusb) — USB device stack this firmware is built on
+- [phdussud/pico-dirtyJtag](https://github.com/phdussud/pico-dirtyJtag) - this firmware is a direct derivative of this project
+- [jeanthom/openocd-dirtyjtag](https://github.com/jeanthom/openocd-dirtyjtag) - OpenOCD driver for DirtyJTAG's native protocol, used as a fallback path
+- [pyftdi](https://github.com/eblot/pyftdi) - used for isolated MPSSE smoke-testing independent of OpenOCD
+- [TinyUSB](https://github.com/hathach/tinyusb) - USB device stack this firmware is built on
