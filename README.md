@@ -56,9 +56,10 @@ If you want to modify firmware, build from `pico-dirtyJtag-master/` with the Pic
 
 ### Step A: Flashing the Firmware
 
-1. Hold the **BOOTSEL** button on the RP2040 while plugging it into your PC via USB.
-2. It will mount as a mass-storage drive. Drag and drop `dirtyJtag.uf2` (from the repo root) onto it.
-3. The board reboots automatically and re-enumerates as the FTDI-compatible device.
+1. Hold the **BOOTSEL** button on the RP2040 while plugging it into your
+2. PC via USB.
+3. It will mount as a mass-storage drive. Drag and drop `dirtyJtag.uf2` (from the repo root) onto it.
+4. The board reboots automatically and re-enumerates as the FTDI-compatible device.
 
 ### Step B: Binding the USB Device to WSL
 
@@ -100,8 +101,6 @@ sudo apt update && sudo apt install openocd
 ```
 This ships the stock `ftdi` adapter driver, which is what Shrike Lite's MPSSE emulation is designed to work with directly.
 
-**If that doesn't get you a working connection**, fall back to the [jeanthom/openocd-dirtyjtag](https://github.com/jeanthom/openocd-dirtyjtag) fork, which adds a dedicated `dirtyjtag` adapter driver speaking DirtyJTAG's original native protocol (VID `0x1209`, PID `0xC0CA`) instead of MPSSE. This targets the pre-Phase-2 native protocol, not the FTDI emulation this README is primarily about — treat it as a fallback / comparison path, not the primary route.
-
 ### Step E: Connecting to the Target (STM32F4)
 
 With mainline OpenOCD and the board enumerated as `0403:6014`:
@@ -109,11 +108,10 @@ With mainline OpenOCD and the board enumerated as `0403:6014`:
 sudo openocd -c "adapter driver ftdi" -c "ftdi_vid_pid 0x0403 0x6014" -c "ftdi_channel 0" -c "ftdi_layout_init 0x0008 0x000b" -c "transport select jtag" -c "adapter speed 1000" -f target/stm32f4x.cfg
 ```
 
-**If this connects and completes target detection: great, you're done — that's the primary supported path.**
+**If this connects and completes target detection: great, we're done - that's the primary supported path.**
 
-**If OpenOCD hangs at `mpsse_flush()`** — this is a known, tracked problem, see [issue #ISSUE_NUMBER](https://github.com/ORG/REPO/issues/ISSUE_NUMBER). While it's open, you have two options:
-1. Wait for a firmware fix and re-flash an updated `dirtyJtag.uf2`, or
-2. Fall back to `jeanthom/openocd-dirtyjtag`'s `dirtyjtag` driver against the original native protocol, understanding this bypasses the MPSSE/FTDI-emulation work entirely.
+**If OpenOCD hangs at `mpsse_flush()`** — this is a known, tracked problem; see [issue](https://github.com/ORG/REPO/issues/ISSUE_NUMBER). While it's open, you have two options:
+Wait for a firmware fix and re-flash an updated `dirtyJtag.uf2`, or
 
 ## Acknowledgements
 
