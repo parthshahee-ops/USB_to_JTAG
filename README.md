@@ -110,6 +110,8 @@ sudo openocd -c "adapter driver ftdi" -c "ftdi_vid_pid 0x0403 0x6014" -c "ftdi_c
 
 **If this connects and completes target detection: great, we're done - that's the primary supported path.**
 
+Alternative: if you are already using the jeanthom/openocd-dirtyjtag fork, you don't need to uninstall or switch anything - that fork is built on top of mainline OpenOCD and includes the standard ftdi driver alongside its own added dirtyjtag driver. Both -c "adapter driver ftdi" ... (this README's primary path) and -c "adapter driver dirtyjtag" ... only the -c flags you pass differ.
+
 **If OpenOCD hangs at `mpsse_flush()`** - this is a known, tracked problem; see [issue](https://github.com/ORG/REPO/issues/ISSUE_NUMBER). While it's open, you have two options:
 Wait for a firmware fix and re-flash an updated `dirtyJtag.uf2`, or
 
