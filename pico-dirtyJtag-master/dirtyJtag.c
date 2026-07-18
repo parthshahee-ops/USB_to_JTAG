@@ -100,9 +100,6 @@ typedef struct {
 #define N_BUFFERS 4
 static buffer_info buffer_infos[N_BUFFERS];
 
-// tx_buf is bounded at 64 bytes (USB full-speed bulk max).
-static cmd_buffer tx_buf;
-
 // ---------------------------------------------------------------------------
 void jtag_main_task(void)
 {
@@ -114,13 +111,10 @@ void jtag_main_task(void)
     }
 #endif
 
-    if (!buffer_infos[wr_buffer_number].busy) {
-        tud_task();
-
-        // Single vendor interface now (CFG_TUD_VENDOR=1): JTAG/MPSSE
-        // traffic -> cmd_handle() pipeline. Non-indexed tud_vendor_*
-        // calls are unambiguous again since there's only one interface.
-        if (tud_vendor_available()) {
+    // Single vendor interface now (CFG_TUD_VENDOR=1): JTAG/MPSSE
+    // traffic -> cmd_handle() pipeline. Non-indexed tud_vendor_*
+    // calls are unambiguous again since there's only one interface.
+    if (tud_vendor_available() && !buffer_infos[wr_buffer_number].busy) {
             led_rx(1);
             uint bnum  = wr_buffer_number;
             uint count = tud_vendor_read(buffer_infos[bnum].buffer, 64);
@@ -134,7 +128,7 @@ void jtag_main_task(void)
             }
             led_rx(0);
         }
-    }
+        tud_task();
 }
 
 void jtag_task(void)
@@ -147,12 +141,11 @@ void jtag_task(void)
 #ifdef MULTICORE
 void core1_entry(void)
 {
-    djtag_init();
     while (1) {
         uint rx_num     = multicore_fifo_pop_blocking();
         buffer_info *bi = &buffer_infos[rx_num];
         assert(bi->busy);
-        cmd_handle(&jtag, bi->buffer, bi->count, tx_buf);
+        cmd_handle(&jtag, bi->buffer, bi->count);
         multicore_fifo_push_blocking(rx_num);
     }
 }
@@ -164,78 +157,11 @@ void fetch_command(void)
     if (buffer_infos[rd_buffer_number].busy) {
         cmd_handle(&jtag,
                    buffer_infos[rd_buffer_number].buffer,
-                   buffer_infos[rd_buffer_number].count,
-                   tx_buf);
+                   buffer_infos[rd_buffer_number].count);
         buffer_infos[rd_buffer_number].busy = false;
         rd_buffer_number = (rd_buffer_number + 1) % N_BUFFERS;
     }
 #endif
-}
-
-// ---------------------------------------------------------------------------
-// FTDI SIO control requests (EP0). libftdi/pyftdi/OpenOCD send these during
-// device open (SIO_RESET) and periodically (SIO_SET_BITMODE when entering
-// MPSSE mode, SIO_SET_LATENCY_TIMER, etc). Previously this callback
-// unconditionally STALLed every vendor control request, which broke
-// mpsse_open() before any bulk data could ever flow (LIBUSB_ERROR_PIPE).
-//
-// Minimum viable behavior: ACK (return true) all known FTDI SIO bRequest
-// values so host-side opens succeed. Most are no-ops functionally right now;
-// SIO_SET_BITMODE is the one that matters going forward (that's the request
-// that tells the device "enter MPSSE mode" - currently accepted but ignored
-// since the single interface only ever speaks MPSSE in this build).
-// ---------------------------------------------------------------------------
-#define FTDI_SIO_RESET              0x00
-#define FTDI_SIO_SET_MODEM_CTRL     0x01
-#define FTDI_SIO_SET_FLOW_CTRL      0x02
-#define FTDI_SIO_SET_BAUD_RATE      0x03
-#define FTDI_SIO_SET_DATA           0x04
-#define FTDI_SIO_SET_LATENCY_TIMER  0x09
-#define FTDI_SIO_GET_LATENCY_TIMER  0x0A
-#define FTDI_SIO_SET_BITMODE        0x0B
-#define FTDI_SIO_READ_EEPROM        0x90
-
-bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage,
-                                 tusb_control_request_t const *request)
-{
-    (void)rhport;
-
-    if (stage != CONTROL_STAGE_SETUP) return true;
-
-    switch (request->bRequest) {
-        case FTDI_SIO_RESET:
-        case FTDI_SIO_SET_MODEM_CTRL:
-        case FTDI_SIO_SET_FLOW_CTRL:
-        case FTDI_SIO_SET_BAUD_RATE:
-        case FTDI_SIO_SET_DATA:
-        case FTDI_SIO_SET_LATENCY_TIMER:
-        case FTDI_SIO_SET_BITMODE:
-            // No hardware action needed for most of these yet; ACK so the
-            // host's open/init sequence doesn't stall. Revisit
-            // SET_BITMODE if runtime MPSSE mode switching is ever needed.
-            return tud_control_status(rhport, request);
-
-        case FTDI_SIO_GET_LATENCY_TIMER:
-        {
-            // Host expects 1 byte back: current latency timer value (ms).
-            // Report a fixed placeholder value; not yet tracked per-device.
-            uint8_t latency = 16;
-            return tud_control_xfer(rhport, request, &latency, 1);
-        }
-
-        case FTDI_SIO_READ_EEPROM:
-            // No emulated EEPROM contents; ACK with zeroed data so chip-type
-            // probing doesn't hang, rather than STALLing and failing open.
-        {
-            uint8_t eeprom_stub[2] = {0x00, 0x00};
-            return tud_control_xfer(rhport, request, eeprom_stub, sizeof(eeprom_stub));
-        }
-
-        default:
-            // Unknown vendor request: STALL as before, don't silently
-            // pretend to support requests we haven't reasoned about.
-            return false;
-    }
 }
 
 // ===========================================================================
