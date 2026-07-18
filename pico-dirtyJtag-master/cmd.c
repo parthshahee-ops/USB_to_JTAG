@@ -12,7 +12,7 @@
 
 // Set to 1 to trace every opcode over the USB CDC/UART console.
 // Uses printf; disable once done debugging, it will desync USB timing.
-#define CMD_TRACE 1
+#define CMD_TRACE 0
 
 // Channel A vendor interface index (JTAG/MPSSE). Must match ITF_NUM_CHANNEL_A
 // in usb_descriptors.c.
@@ -116,7 +116,6 @@ typedef enum {
 
 static parser_state_t state = ST_IDLE;
 static uint32_t stream_remaining = 0; // bytes left to consume for current stream op
-static uint32_t stream_readback  = 0; // bytes of TDO to still send back for current stream op
 static bool     stream_write     = false; // does this op consume TDI bytes from host
 static bool     stream_read      = false; // does this op produce TDO bytes to host
 
@@ -134,25 +133,61 @@ static uint8_t pending_need = 0;
 // modem-status header must precede the first byte of every Bulk IN
 // transaction, so it's written once per cmd_handle() invocation, not once
 // per opcode.
-static uint8_t  out_buf[256];
+static uint8_t  out_buf[64]; //changed from 256 to 64
 static uint32_t out_len = 0;
+
+// Maximum number of consecutive zero-progress iterations we'll tolerate
+// before giving up on a write. At ~1us/iteration in the MULTICORE
+// tight_loop_contents() path this is a generous but bounded timeout --
+// previously there was no cap at all, so a stalled endpoint that still
+// reported tud_mounted()==true (host present but not draining) would spin
+// Core 0 forever. Bails out and drops the remainder of the packet rather
+// than hanging.
+#define SAFE_USB_WRITE_MAX_STALL_ITERS 5000000u
+
+static inline void safe_usb_write(const uint8_t *buf, uint32_t len) {
+    uint32_t written = 0;
+    uint32_t stall_iters = 0;
+    while (written < len) {
+        uint32_t w = tud_vendor_n_write(MPSSE_ITF, buf + written, len - written);
+        written += w;
+
+        if (!tud_mounted()) break;
+
+        if (written < len) {
+            if (w == 0) {
+                if (++stall_iters >= SAFE_USB_WRITE_MAX_STALL_ITERS) {
+                    // Host isn't draining the endpoint -- give up rather than
+                    // hang. Remaining bytes are dropped; caller has no way to
+                    // be told, but a dropped packet beats a wedged firmware.
+                    break;
+                }
+            } else {
+                stall_iters = 0;
+            }
+
+            tud_vendor_n_flush(MPSSE_ITF);
+
+            // CRITICAL FIX: Only call tud_task() if we are running in single-core mode.
+            // If MULTICORE is defined, Core 0 is already running tud_task() in the background.
+#ifndef MULTICORE
+            tud_task(); 
+#else
+            // In multicore mode, just yield a few cycles to let Core 0 drain the FIFO
+            tight_loop_contents(); 
+#endif
+        }
+    }
+    tud_vendor_n_flush(MPSSE_ITF);
+}
 
 static inline void out_flush(void)
 {
-  if (out_len > 0) {
-    led_tx(0); // diagnostic: confirms this flush path executes (GPIO4 on Shrike Lite)
-    tud_vendor_n_write(MPSSE_ITF, out_buf, out_len);
-    tud_vendor_n_flush(MPSSE_ITF);
-    // Re-arm the mandatory 2-byte FTDI modem-status header immediately,
-    // rather than leaving out_len at 0. Every USB Bulk IN transaction the
-    // host reads must start with this header; previously it was only
-    // written once per cmd_handle() call via out_begin_packet(). If a
-    // single large stream read overflowed out_buf mid-processing, this
-    // function would flush a header-less continuation packet, which
-    // desyncs libftdi/pyftdi's modem-status parsing on every read after
-    // that point. Safe to do unconditionally: the very next cmd_handle()
-    // call still calls out_begin_packet() itself, which just overwrites
-    // these same two bytes again.
+  if (out_len > 2) {    
+    // Use the safe blocking write to guarantee delivery
+    safe_usb_write(out_buf, out_len);
+    
+    // Re-arm the mandatory 2-byte FTDI modem-status header
     out_buf[0] = 0x01;
     out_buf[1] = 0x60;
     out_len = 2;
@@ -239,7 +274,6 @@ static uint8_t sample_bits_low(pio_jtag_inst_t *jtag)
 static void begin_stream_op(uint8_t opcode, uint32_t nbytes)
 {
   stream_remaining  = nbytes;
-  stream_readback   = 0;
   stream_write      = false;
   stream_read       = false;
 
@@ -262,7 +296,6 @@ static void begin_stream_op(uint8_t opcode, uint32_t nbytes)
     default:
       break;
   }
-  if (stream_read) stream_readback = nbytes;
 }
 
 // Consumes as many stream bytes as are available in [*pp, end), advancing
@@ -290,6 +323,19 @@ static void pump_stream(pio_jtag_inst_t *jtag, const uint8_t **pp, const uint8_t
       out_push(out_byte);
     } else if (stream_write) {
       jtag_transfer(jtag, 8, &in_byte, NULL);
+
+      // CRITICAL FIX: Prevent USB timeout on long write-only streams!
+      // Write-only ops (e.g. bitstream push) never call out_push()/
+      // out_flush(), so without this the USB stack never gets serviced
+      // for the whole duration of a large stream and the host times out.
+      // Service the TinyUSB background stack every 64 bytes.
+      if ((stream_remaining & 0x3F) == 0) {
+#ifndef MULTICORE
+        tud_task();
+#else
+        tight_loop_contents();
+#endif
+      }
     }
 
     stream_remaining--;
@@ -319,7 +365,8 @@ static void apply_tms_shift(pio_jtag_inst_t *jtag, uint8_t opcode, uint8_t lengt
 
   for (uint8_t i = 0; i < nbits; i++) {
     bool tms_bit = !!(data_byte & (1 << i));
-    readout = jtag_strobe(jtag, 1, tms_bit, tdi_level);
+    uint8_t shift_pos = 8 - nbits + i; 
+    readout |= ((jtag_strobe(jtag, 1, tms_bit, tdi_level) & 1) << shift_pos);
   }
   if (want_read) out_push(readout);
 }
@@ -351,6 +398,74 @@ static void apply_bit_shift(pio_jtag_inst_t *jtag, uint8_t opcode, uint8_t lengt
   } else if (do_write) {
     jtag_transfer(jtag, nbits, &in_byte, NULL);
   }
+}
+
+bool tud_vendor_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_control_request_t const * request) {
+  if (request->bmRequestType_bit.type == TUSB_REQ_TYPE_VENDOR) {
+    if (stage == CONTROL_STAGE_SETUP) {
+      
+      // === IN REQUESTS (Host asking RP2040 for data) ===
+      if (request->bmRequestType_bit.direction == TUSB_DIR_IN) {
+        
+        // 1. Handle EEPROM Read (0x90) - Structurally valid FT232H Image
+        if (request->bRequest == 0x90) {
+            // Structurally valid FT232H Image with mathematically correct CRC checksum (0x18C7)
+            static const uint16_t ftdi_eeprom_image[64] = {
+                0x0000, 0x0403, 0x6014, 0x0900, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000,
+                0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x18C7
+            };
+            uint16_t word_offset = request->wIndex;
+            
+            if (word_offset < 64) {
+                // Calculate exactly how many bytes are left in our array from this offset
+                // (64 total words - current word offset) * 2 bytes per word
+                uint16_t max_bytes_left = (64 - word_offset) * 2;
+                
+                // Only send the requested length, OR the max bytes left (whichever is smaller)
+                uint16_t safe_len = request->wLength;
+                if (safe_len > max_bytes_left) {
+                    safe_len = max_bytes_left;
+                }
+                
+                tud_control_xfer(rhport, request, (void*)&ftdi_eeprom_image[word_offset], safe_len);
+            } else {
+                tud_control_xfer(rhport, request, NULL, 0); 
+            }
+          }
+        // 2. Handle Latency Timer (0x0A)
+        else if (request->bRequest == 0x0A) {
+            static uint8_t latency_timer[1] = {16}; 
+            uint16_t len = request->wLength > 1 ? 1 : request->wLength;
+            tud_control_xfer(rhport, request, latency_timer, len);
+        }
+        // 3. Handle Modem Status (0x05)
+        else if (request->bRequest == 0x05) {
+            static uint8_t modem_status[2] = {0x01, 0x60}; 
+            uint16_t len = request->wLength > 2 ? 2 : request->wLength;
+            tud_control_xfer(rhport, request, modem_status, len);
+        }
+        // 4. Generic fallback for other IN requests (prevents STALL)
+        else {
+            static uint8_t dummy_response[2] = {0, 0};
+            uint16_t len = request->wLength > 2 ? 2 : request->wLength;
+            tud_control_xfer(rhport, request, dummy_response, len);
+        }
+      }
+      // === OUT REQUESTS (Host configuring RP2040) ===
+      else {
+        // Correctly ACKs FT_SetBitMode, Reset, etc.
+        tud_control_xfer(rhport, request, NULL, 0); 
+      }
+    }
+    return true; 
+  }
+  return false;
 }
 
 // Dispatches one fully-assembled fixed-size opcode. `args` points at the
@@ -411,10 +526,9 @@ static void dispatch_fixed_opcode(pio_jtag_inst_t *jtag, uint8_t opcode, const u
 // on Channel A. State persists across calls via the static parser_state_t
 // and the pending_buf/stream_* statics.
 // ---------------------------------------------------------------------------
-void cmd_handle(pio_jtag_inst_t* jtag, uint8_t* rxbuf, uint32_t count, uint8_t* tx_buf)
+void cmd_handle(pio_jtag_inst_t* jtag, uint8_t* rxbuf, uint32_t count)
 {
   led_tx(1); // diagnostic: confirms cmd_handle() is being entered (GPIO4 on Shrike Lite)
-  (void)tx_buf; // response now goes through out_buf / tud_vendor_n_write directly
 
   if (count == 0) return;
 
@@ -577,21 +691,29 @@ void cmd_handle(pio_jtag_inst_t* jtag, uint8_t* rxbuf, uint32_t count, uint8_t* 
         break;
 
       case OP_SEND_IMMEDIATE:
-        // Flush whatever's pending now rather than waiting for more
-        // opcodes. out_flush() re-arms the status header itself, so no
-        // separate out_begin_packet() call is needed here any more.
-        out_flush();
+        if (out_len == 2) {
+            // Use the safe blocking write here as well
+            safe_usb_write(out_buf, out_len);
+        } else {
+            out_flush();
+        }
         break;
 
-      default:
-        // Unknown opcode: drop it, don't wedge the parser. Real MPSSE
-        // hosts shouldn't send anything outside this set during JTAG use.
+    default:
+      // Real FT232H responds to unrecognized opcodes with 0xFA + the bad
+      // opcode byte -- hosts (including Efinity) rely on this for MPSSE
+      // command-sync during connect.
+      out_push(0xFA);
+      out_push(opcode);
 #if CMD_TRACE
-        printf("Unknown MPSSE opcode 0x%02x, skipping\n", opcode);
+      printf("Unknown MPSSE opcode 0x%02x, sent 0xFA sync\n", opcode);
 #endif
-        break;
-    }
-  }
+      break;
 
-  out_flush();
-}
+    } // end switch
+  } // end while (CRITICAL: this brace must be here!)
+
+  out_flush(); // Flush only ONCE after the entire packet is parsed
+  led_tx(0); // diagnostic: confirms this flush path executes
+
+} // end cmd_handle
