@@ -40,6 +40,7 @@ The device broadcasts the standard FTDI VID/PID pair `0403:6014` (FT232H, single
 .
 ├── pico-dirtyJtag-master/    # Firmware source (CMake project, TinyUSB + PIO)
 ├── pico_mpsse.c              # Reference MPSSE implementation, adapted from MiSTle-Dev/PICO-MPSSE
+├── usb_descriptors.c         # TinyUSB device/config/string descriptors - FTDI VID/PID identity lives here
 ├── dirtyJtag.uf2             # Pre-compiled binary - flash this directly, no build required
 ├── README.md
 └── .gitignore
@@ -102,6 +103,29 @@ Unplug/replug (or re-run `usbipd attach`) after adding the rule for it to take e
 ### Step D: Connecting via Efinity
 
 With the board enumerated as `0403:6014`, open Efinity's programmer tool and select the board as the USB target (shown as `(local) Shrike Lite` with FT232H board profile). Efinity currently detects and identifies the device correctly, but the programming/JTAG session fails - see [Known Issues](#known-issues).
+
+## Changing the USB VID/PID
+
+Shrike Lite currently identifies as FTDI's FT232H (VID `0x0403`, PID `0x6014`) so that stock FTDI tooling recognizes it without a custom driver. This VID/PID pair is defined in a single place: `desc_device` in `usb_descriptors.c`.
+
+To change it, edit the `idVendor` / `idProduct` fields:
+
+```c
+tusb_desc_device_t const desc_device =
+{
+    ...
+    .idVendor           = 0x0403, // FTDI
+    .idProduct          = 0x6014, // FT232H (single channel)
+    ...
+};
+```
+
+Notes:
+
+- `bcdDevice` (`0x0900`) is the FTDI-reported device release number; if you change VID/PID away from FTDI's, this field is no longer meaningful and can be set to whatever your own descriptor scheme uses.
+- The three string descriptors (`iManufacturer`, `iProduct`, `iSerialNumber`) are defined separately in `string_desc_arr[]` in the same file (currently `"Shrike Lite Project"` / `"Shrike Lite"` / `usb_serial`) - update these too if you're moving away from an FTDI-compatible identity, since host tooling and udev rules often match on these alongside VID/PID.
+- After changing VID/PID, remember to update any host-side references that key off `0403:6014` - the `usbipd`/udev steps in this README (Steps B and C), and any OpenOCD/pyftdi/Efinity config that hardcodes the FTDI IDs.
+- Rebuild and reflash (`Step A`) for the change to take effect; the board will re-enumerate under the new identity.
 
 ## Known Issues
 
