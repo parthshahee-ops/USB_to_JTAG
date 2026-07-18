@@ -70,7 +70,7 @@
 // CDC removed for Phase-2 FT232H bring-up: this is a single vendor-class
 // bulk interface speaking MPSSE, not CDC-ACM -- real FT232H does not
 // expose CDC at the USB level.
-#define CFG_TUD_CDC              0
+#define CFG_TUD_CDC             0
 #define CFG_TUD_MSC             0
 #define CFG_TUD_MIDI            0
 
@@ -81,8 +81,8 @@
 
 // 128/64 is a reasonable starting point; revisit once JTAG/MPSSE scan
 // batching is in place -- larger RX/TX may help throughput.
-#define CFG_TUD_VENDOR_RX_BUFSIZE 128
-#define CFG_TUD_VENDOR_TX_BUFSIZE 64
+#define CFG_TUD_VENDOR_RX_BUFSIZE 1024
+#define CFG_TUD_VENDOR_TX_BUFSIZE 2048
 
 #ifdef __cplusplus
  }
